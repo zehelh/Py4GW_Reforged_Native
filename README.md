@@ -67,7 +67,7 @@ Or plainly:
     cmake --build build --config RelWithDebInfo
 
 The resulting `Py4GW.dll` is written to the repo root, next to the runtime
-payload directories (`fonts/`, `scripts/`, `offsets/`) it loads at startup, so
+payload directories (`Assets/Fonts/`, `scripts/`, `offsets/`) it loads at startup, so
 no copy step is needed.
 
 ## Contributing

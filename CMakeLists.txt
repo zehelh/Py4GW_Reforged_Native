@@ -23,7 +23,7 @@ option(PY4GW_BUILD_IMGUI_DEMO "Compile Dear ImGui demo sources." ON)
 option(PY4GW_ENABLE_FREETYPE "Rasterize ImGui fonts with the vendored FreeType (sharper than stb_truetype)." ON)
 
 # Keep the injected DLL beside the runtime payload directories so the module can
-# resolve fonts/, scripts/, and offsets/ directly from the repository root.
+# resolve Assets/Fonts, scripts/, and offsets/ directly from the repository root.
 set(PY4GW_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PY4GW_RUNTIME_OUTPUT_DIRECTORY}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PY4GW_RUNTIME_OUTPUT_DIRECTORY}")

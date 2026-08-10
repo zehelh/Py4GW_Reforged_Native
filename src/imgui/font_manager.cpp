@@ -182,13 +182,13 @@ bool FontManager::ResolveFontDirectory() {
         return true;
     }
 
-    std::filesystem::path directory = PY4GW::process_manager::GetModuleDirectory() / "fonts";
+    std::filesystem::path directory = PY4GW::process_manager::GetModuleDirectory() / "Assets" / "Fonts";
     if (std::filesystem::exists(directory)) {
         font_dir_ = directory.string();
         return true;
     }
 
-    directory = PY4GW::process_manager::GetProcessDirectory() / "fonts";
+    directory = PY4GW::process_manager::GetProcessDirectory() / "Assets" / "Fonts";
     if (std::filesystem::exists(directory)) {
         font_dir_ = directory.string();
         return true;

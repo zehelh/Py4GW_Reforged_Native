@@ -16,27 +16,45 @@ PYBIND11_EMBEDDED_MODULE(PyTrade, m) {
     }, py::arg("agent_id"));
 
     m.def("accept_trade", []() -> bool {
-        return GW::trade::AcceptTrade();
+        GW::game_thread::Enqueue([]() {
+            GW::trade::AcceptTrade();
+        });
+        return true;
     });
 
     m.def("cancel_trade", []() -> bool {
-        return GW::trade::CancelTrade();
+        GW::game_thread::Enqueue([]() {
+            GW::trade::CancelTrade();
+        });
+        return true;
     });
 
     m.def("change_offer", []() -> bool {
-        return GW::trade::ChangeOffer();
+        GW::game_thread::Enqueue([]() {
+            GW::trade::ChangeOffer();
+        });
+        return true;
     });
 
     m.def("submit_offer", [](uint32_t gold) -> bool {
-        return GW::trade::SubmitOffer(gold);
+        GW::game_thread::Enqueue([gold]() {
+            GW::trade::SubmitOffer(gold);
+        });
+        return true;
     }, py::arg("gold"));
 
     m.def("remove_item", [](uint32_t slot) -> bool {
-        return GW::trade::RemoveItem(slot);
+        GW::game_thread::Enqueue([slot]() {
+            GW::trade::RemoveItem(slot);
+        });
+        return true;
     }, py::arg("slot"));
 
     m.def("offer_item", [](uint32_t item_id, uint32_t quantity) -> bool {
-        return GW::trade::OfferItem(item_id, quantity);
+        GW::game_thread::Enqueue([item_id, quantity]() {
+            GW::trade::OfferItem(item_id, quantity);
+        });
+        return true;
     }, py::arg("item_id"), py::arg("quantity") = 0);
 
     m.def("is_item_offered", [](uint32_t item_id) -> bool {

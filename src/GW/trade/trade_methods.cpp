@@ -17,7 +17,12 @@ uint32_t GetTradeState() {
 }
 
 bool OpenTradeWindow(uint32_t agent_id) {
-    return ui::SendUIMessage(ui::UIMessage::kInitiateTrade, (void*)agent_id);
+    ui::packet::kSendWorldAction action{
+        Constants::WorldActionId::InteractTrade,
+        agent_id,
+        false,
+    };
+    return ui::SendUIMessage(ui::UIMessage::kSendWorldAction, &action);
 }
 
 bool AcceptTrade() {
