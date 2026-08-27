@@ -10,6 +10,8 @@
 
 #include <shellapi.h>
 
+#include <deque>
+
 namespace GW::Context {
 extern uintptr_t g_world_map_state_addr;
 extern uintptr_t g_preferences_initialized_addr;
@@ -271,6 +273,7 @@ extern bool g_callback_mutex_initialized;
 extern std::unordered_map<UIMessage, std::vector<UIMessageCallbackEntry>> g_ui_message_callbacks;
 extern std::unordered_map<UIMessage, std::vector<FrameUIMessageCallbackEntry>> g_frame_ui_message_callbacks;
 extern std::vector<CreateUIComponentCallbackEntry> g_create_ui_component_callbacks;
+extern std::deque<UIMessageLogEntry> g_ui_message_logs;
 extern bool g_open_links;
 extern PY4GW::HookEntry g_open_template_hook;
 extern std::atomic<bool> g_initialized;
@@ -294,6 +297,7 @@ void __cdecl OnSendUIMessage(UIMessage message_id, void* wparam, void* lparam) {
     PY4GW::HookBase::EnterHook();
     ++g_active_hooks;
     if (!g_shutting_down) {
+        RecordUIMessage(message_id, wparam, lparam, true, false, 0);
         SendUIMessage(message_id, wparam, lparam);
     } else if (g_send_ui_message_original) {
         g_send_ui_message_original(message_id, wparam, lparam);
@@ -338,10 +342,11 @@ void __fastcall OnSendFrameUIMessage(GW::GWArray<UIInteractionCallback>* frame_c
     PY4GW::HookBase::EnterHook();
     ++g_active_hooks;
     // The callback array can outlive its Frame while inventory controls are
-    // being torn down.  Reconstructing Frame at callbacks-0xA8 and routing
-    // through SendFrameUIMessage then dereferences that stale object.  For
-    // game-originated messages, preserve the original call ABI exactly; the
-    // public SendFrameUIMessage API remains available for explicit callers.
+    // being torn down. Record only raw arguments and preserve the original
+    // ABI; do not reconstruct a Frame from callbacks-0xA8 here.
+    if (!g_shutting_down) {
+        RecordUIMessage(message_id, wparam, lparam, true, true, 0);
+    }
     if (g_send_frame_ui_message_original) {
         g_send_frame_ui_message_original(frame_callbacks, nullptr, message_id, wparam, lparam);
     }
@@ -726,10 +731,9 @@ bool Init() {
         Logger::Instance().LogWarning("SendUIMessage_Func is unavailable; UI message hooks will remain disabled.", "ui");
     }
 
-    // Do not detour frame-message dispatch. Its callback-array argument is
-    // also used during frame teardown, and the game can legitimately invoke
-    // it after the owning Frame has been destroyed. Keep the resolved entry
-    // point available for explicit, validated API calls only.
+    // Frame-message dispatch is observed passively. The hook records raw
+    // arguments and calls the original ABI directly; it never reconstructs
+    // a Frame from the callback-array pointer during teardown.
     if (g_send_frame_ui_message_by_id_func) {
         g_send_frame_ui_message_by_id_original = g_send_frame_ui_message_by_id_func;
     } else {
@@ -737,7 +741,13 @@ bool Init() {
     }
 
     if (g_send_frame_ui_message_func) {
-        g_send_frame_ui_message_original = g_send_frame_ui_message_func;
+        Logger::AssertHook(
+            "SendFrameUIMessage_Func",
+            PY4GW::HookBase::CreateHook(
+                reinterpret_cast<void**>(&g_send_frame_ui_message_func),
+                reinterpret_cast<void*>(&OnSendFrameUIMessage),
+                reinterpret_cast<void**>(&g_send_frame_ui_message_original)),
+            "ui");
     } else {
         Logger::Instance().LogWarning("SendFrameUIMessage_Func is unavailable; frame message calls will remain disabled.", "ui");
     }
@@ -779,6 +789,9 @@ void EnableHooks() {
     if (g_send_ui_message_func) {
         PY4GW::HookBase::EnableHooks(reinterpret_cast<void*>(g_send_ui_message_func));
     }
+    if (g_send_frame_ui_message_func) {
+        PY4GW::HookBase::EnableHooks(reinterpret_cast<void*>(g_send_frame_ui_message_func));
+    }
     if (g_create_ui_component_func) {
         PY4GW::HookBase::EnableHooks(reinterpret_cast<void*>(g_create_ui_component_func));
     }
@@ -796,6 +809,9 @@ void DisableHooks() {
     RemoveUIMessageCallback(&g_open_template_hook);
     if (g_send_ui_message_func) {
         PY4GW::HookBase::DisableHooks(reinterpret_cast<void*>(g_send_ui_message_func));
+    }
+    if (g_send_frame_ui_message_func) {
+        PY4GW::HookBase::DisableHooks(reinterpret_cast<void*>(g_send_frame_ui_message_func));
     }
     if (g_create_ui_component_func) {
         PY4GW::HookBase::DisableHooks(reinterpret_cast<void*>(g_create_ui_component_func));
@@ -815,11 +831,15 @@ void Exit() {
         g_ui_message_callbacks.clear();
         g_frame_ui_message_callbacks.clear();
         g_create_ui_component_callbacks.clear();
+        g_ui_message_logs.clear();
         ::LeaveCriticalSection(&g_callback_mutex);
     }
 
     if (g_send_ui_message_func) {
         PY4GW::HookBase::RemoveHook(reinterpret_cast<void*>(g_send_ui_message_func));
+    }
+    if (g_send_frame_ui_message_func) {
+        PY4GW::HookBase::RemoveHook(reinterpret_cast<void*>(g_send_frame_ui_message_func));
     }
     if (g_create_ui_component_func) {
         PY4GW::HookBase::RemoveHook(reinterpret_cast<void*>(g_create_ui_component_func));
@@ -1054,6 +1074,7 @@ bool g_callback_mutex_initialized = false;
 std::unordered_map<UIMessage, std::vector<UIMessageCallbackEntry>> g_ui_message_callbacks;
 std::unordered_map<UIMessage, std::vector<FrameUIMessageCallbackEntry>> g_frame_ui_message_callbacks;
 std::vector<CreateUIComponentCallbackEntry> g_create_ui_component_callbacks;
+std::deque<UIMessageLogEntry> g_ui_message_logs;
 bool g_open_links = false;
 PY4GW::HookEntry g_open_template_hook;
 std::atomic<bool> g_initialized = false;
@@ -1073,6 +1094,82 @@ UIInteractionCallback g_editable_text_frame_callback = nullptr;
 UIInteractionCallback g_progress_bar_callback = nullptr;
 UIInteractionCallback g_tabs_frame_callback = nullptr;
 bool g_typed_component_callbacks_initialized = false;
+
+namespace {
+constexpr size_t kMaxUIMessagePayloadBytes = 64;
+constexpr size_t kMaxUIMessageLogEntries = 8192;
+
+void CopyUIMessageBytes(std::vector<uint8_t>& output, const void* source) {
+    if (!source) {
+        return;
+    }
+
+    MEMORY_BASIC_INFORMATION info{};
+    if (::VirtualQuery(source, &info, sizeof(info)) != sizeof(info) ||
+        info.State != MEM_COMMIT ||
+        (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+        return;
+    }
+
+    const auto address = reinterpret_cast<uintptr_t>(source);
+    const auto region_end = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+    if (address >= region_end) {
+        return;
+    }
+    const size_t count = static_cast<size_t>(region_end - address) < kMaxUIMessagePayloadBytes
+        ? static_cast<size_t>(region_end - address)
+        : kMaxUIMessagePayloadBytes;
+    __try {
+        const auto* bytes = static_cast<const uint8_t*>(source);
+        output.assign(bytes, bytes + count);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        output.clear();
+    }
+}
+}  // namespace
+
+void RecordUIMessage(UIMessage message_id, void* wparam, void* lparam, bool incoming, bool is_frame_message, uint32_t frame_id) {
+    if (!g_callback_mutex_initialized) {
+        return;
+    }
+
+    UIMessageLogEntry entry{
+        ::GetTickCount64(),
+        static_cast<uint32_t>(message_id),
+        incoming,
+        is_frame_message,
+        frame_id,
+        {},
+        {}};
+    CopyUIMessageBytes(std::get<5>(entry), wparam);
+    CopyUIMessageBytes(std::get<6>(entry), lparam);
+
+    ::EnterCriticalSection(&g_callback_mutex);
+    g_ui_message_logs.emplace_back(std::move(entry));
+    if (g_ui_message_logs.size() > kMaxUIMessageLogEntries) {
+        g_ui_message_logs.pop_front();
+    }
+    ::LeaveCriticalSection(&g_callback_mutex);
+}
+
+std::vector<UIMessageLogEntry> GetUIMessageLogs() {
+    if (!g_callback_mutex_initialized) {
+        return {};
+    }
+    ::EnterCriticalSection(&g_callback_mutex);
+    std::vector<UIMessageLogEntry> result(g_ui_message_logs.begin(), g_ui_message_logs.end());
+    ::LeaveCriticalSection(&g_callback_mutex);
+    return result;
+}
+
+void ClearUIMessageLogs() {
+    if (!g_callback_mutex_initialized) {
+        return;
+    }
+    ::EnterCriticalSection(&g_callback_mutex);
+    g_ui_message_logs.clear();
+    ::LeaveCriticalSection(&g_callback_mutex);
+}
 
 bool InitializeTypedComponentCallbacks() {
     return TryResolveTypedComponentCallbacks();

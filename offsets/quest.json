@@ -2,8 +2,8 @@
   "namespace": "quest",
   "patterns": {
     "request_anchor": {
-      "pattern": "\\x85\\xF6\\x75\\x14\\x68\\xAF\\x10\\x00\\x00",
-      "mask": "xxxxxxxxx",
+      "pattern": "\\xD9\\x46\\x1C\\xDA\\xE9\\xDF\\xE0\\xF6\\xC4\\x44\\x7A\\x09",
+      "mask": "xxxxxxxxxxxx",
       "offset": "0",
       "range": "0xFF",
       "section": "text"

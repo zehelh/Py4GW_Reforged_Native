@@ -23,7 +23,7 @@ namespace GW::Context {
     };
     static_assert(sizeof(CharProgressBar) == 0x2C, "CharProgressBar size mismatch");
 
-    struct CharContext { // total: 0x440
+    struct CharContext { // total: 0x448
         /* +h0000 */ GW::GWArray<void*> h0000;
         /* +h0010 */ uint32_t h0010;
         /* +h0014 */ GW::GWArray<void*> h0014;
@@ -56,8 +56,8 @@ namespace GW::Context {
         /* +h02AC */ uint32_t player_number;
         /* +h02B0 */ uint32_t h02B0[40];
         /* +h0350 */ CharProgressBar* progress_bar; // seems to never be nullptr
-        /* +h0354 */ uint32_t h0354[27];
-        /* +h03C0 */ wchar_t player_email[0x40];
+        /* +h0354 */ uint32_t h0354[29];
+        /* +h03C8 */ wchar_t player_email[0x40];
     };
-    static_assert(sizeof(CharContext) == 0x440, "struct CharContext has incorrect size");
+    static_assert(sizeof(CharContext) == 0x448, "struct CharContext has incorrect size");
 }

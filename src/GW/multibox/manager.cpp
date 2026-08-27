@@ -212,60 +212,104 @@ int Manager::FindAccountSlot(const std::string& email) const {
         return -1;
     }
     AllAccounts* view = View();
+    const uint64_t our_hwnd = reinterpret_cast<uint64_t>(GW::render::GetWindowHandle());
+    int fallback = -1;
+    int active_fallback = -1;
+    uint32_t newest = 0;
     for (uint32_t i = 0; i < kMaxPlayers; ++i) {
         const AccountStruct& slot = view->AccountData[i];
-        if (slot.IsAccount && SlotEmailEquals(slot.AccountEmail, kMaxEmailLen, email)) {
+        if (!slot.IsAccount || !SlotEmailEquals(slot.AccountEmail, kMaxEmailLen, email)) {
+            continue;
+        }
+        if (fallback == -1) {
+            fallback = static_cast<int>(i);
+        }
+        // Prefer the slot carrying our own window-handle key. This self-heals
+        // transient duplicates left by the pre-atomicity claim race and mirrors
+        // the Python _find_account_slot_by_email HWND preference.
+        if (view->Keys[i].HWND == our_hwnd && view->Keys[i].EntityType == 0) {
             return static_cast<int>(i);
         }
+        if (slot.LastUpdated >= newest) {
+            newest = slot.LastUpdated;
+            active_fallback = static_cast<int>(i);
+        }
     }
-    return -1;
+    if (active_fallback != -1) {
+        return active_fallback;
+    }
+    return fallback;
 }
 
-int Manager::FindEmptyOrExpiredSlot(bool allow_expired_reclaim) const {
+bool Manager::TryReserveSlot(int index, uint64_t expected_hwnd) {
+    // Key.HWND doubles as the per-slot reservation word. The layout has no
+    // spare state bytes and adding one would break the byte-identical Python
+    // mirror, so the existing 8-byte HWND field is claimed atomically instead.
+    // Empty slots carry HWND == 0 (the creator zeroes Keys); reclaiming an
+    // expired slot reserves against the stale owner's HWND value read just now.
+    // The fill that follows is a few instructions; a crash inside that window
+    // can leak one reservation (the slot stays IsSlotActive == false and its
+    // HWND no longer matches the expected 0), which is acceptable degradation
+    // versus the previous every-frame double-claim churn.
     AllAccounts* view = View();
-    for (uint32_t i = 0; i < kMaxPlayers; ++i) {
-        if (!view->AccountData[i].IsSlotActive) {
-            return static_cast<int>(i);
-        }
-    }
-    if (!allow_expired_reclaim) {
-        return -1;
-    }
-    // Same frame-coherent clock the LastUpdated stamps use (see NowTick32).
-    const uint64_t now = PY4GW::System::GetTickCount64();
-    for (uint32_t i = 0; i < kMaxPlayers; ++i) {
-        if (IsSlotExpired(static_cast<int>(i), now)) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
+    volatile LONG64* word = reinterpret_cast<volatile LONG64*>(&view->Keys[index].HWND);
+    const LONG64 ours = static_cast<LONG64>(reinterpret_cast<uint64_t>(GW::render::GetWindowHandle()));
+    const LONG64 expected = static_cast<LONG64>(expected_hwnd);
+    return ::InterlockedCompareExchange64(word, ours, expected) == expected;
+}
+
+void Manager::InitAccountSlot(AllAccounts* view, int index, const std::string& email, uint64_t hwnd) {
+    AccountStruct& slot = view->AccountData[index];
+    slot = AccountStruct{};  // reset on fresh claim
+    slot.SlotNumber = static_cast<uint32_t>(index);
+    slot.IsSlotActive = true;
+    slot.IsAccount = true;
+    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    slot.Key.HWND = hwnd;
+    slot.Key.EntityType = 0;
+    slot.Key.LocalIndex = 0;
+    view->Keys[index] = slot.Key;  // HWND already reserved by TryReserveSlot
 }
 
 // Resolve this client's own account slot, claiming one if we do not own it yet.
-// NOTE (sturdiness): the claim below is not yet atomic against other writers.
-// Because C++ owns allocation, this is where an InterlockedCompareExchange on a
-// per-slot reservation word belongs. Left as a follow-up so the port stays a
-// faithful 1:1 of the Python find/claim behavior first.
 int Manager::FindOrClaimAccountSlot(const std::string& email) {
     int index = FindAccountSlot(email);
     if (index != -1) {
         return index;
     }
-    index = FindEmptyOrExpiredSlot(/*allow_expired_reclaim=*/true);
-    if (index == -1) {
-        return -1;
+
+    AllAccounts* view = View();
+    const uint64_t our_hwnd = reinterpret_cast<uint64_t>(GW::render::GetWindowHandle());
+
+    // Pass 1: empty slots (reserve against HWND == 0).
+    for (uint32_t i = 0; i < kMaxPlayers; ++i) {
+        if (view->AccountData[i].IsSlotActive) {
+            continue;
+        }
+        if (!TryReserveSlot(static_cast<int>(i), 0)) {
+            continue;  // another writer won the race
+        }
+        InitAccountSlot(view, static_cast<int>(i), email, our_hwnd);
+        return static_cast<int>(i);
     }
-    AccountStruct& slot = View()->AccountData[index];
-    slot = AccountStruct{};  // reset on fresh claim
-    slot.SlotNumber = index;
-    slot.IsSlotActive = true;
-    slot.IsAccount = true;
-    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
-    slot.Key.HWND = reinterpret_cast<uint64_t>(GW::render::GetWindowHandle());
-    slot.Key.EntityType = 0;
-    slot.Key.LocalIndex = 0;
-    View()->Keys[index] = slot.Key;
-    return index;
+
+    // Pass 2: expired slots (reserve against the stale owner's HWND). This is
+    // the legacy allow_expired_reclaim=true path made atomic: two writers racing
+    // for the same expired slot can no longer both win it and clobber each
+    // other's identity on the next frames.
+    const uint64_t now = PY4GW::System::GetTickCount64();
+    for (uint32_t i = 0; i < kMaxPlayers; ++i) {
+        if (!IsSlotExpired(static_cast<int>(i), now)) {
+            continue;
+        }
+        const uint64_t stale_hwnd = view->Keys[i].HWND;
+        if (!TryReserveSlot(static_cast<int>(i), stale_hwnd)) {
+            continue;
+        }
+        InitAccountSlot(view, static_cast<int>(i), email, our_hwnd);
+        return static_cast<int>(i);
+    }
+    return -1;
 }
 
 // --- payload fill ------------------------------------------------------------
@@ -533,7 +577,13 @@ void Manager::FillAccountPayload(AccountStruct& slot, const std::string& email, 
     slot.IsHero = false;
     slot.IsPet = false;
     slot.IsNPC = false;
-    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    // The email anchor is immutable per slot owner; write it only when it
+    // actually changes. The old unconditional wmemset-then-copy created a
+    // per-frame window in which cross-process readers could observe an empty
+    // AccountEmail and miss the slot's options entirely.
+    if (!SlotEmailEquals(slot.AccountEmail, kMaxEmailLen, email)) {
+        WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    }
 
     if (!gates_ok) {
         // Map gates unmet: zero the payload but keep the slot latched + heartbeat.
@@ -672,20 +722,34 @@ int Manager::FindOrClaimChildSlot(const std::string& email, uint32_t entity_type
     if (index != -1) {
         return index;
     }
-    index = FindEmptyOrExpiredSlot(/*allow_expired_reclaim=*/true);
-    if (index == -1) {
-        return -1;
+
+    // Legacy parity: the Python writer only ever claimed EMPTY slots for
+    // heroes/pets (GetEmptySlot(allow_expired_reclaim=False)). Reclaiming an
+    // expired slot here could evict a stalled account slot that is merely a few
+    // seconds behind on its heartbeat, which bounced accounts onto new indexes
+    // and orphaned their HeroAIOptions. Own-expired child slots are still
+    // reused because FindChildSlot matches by key regardless of expiry.
+    AllAccounts* view = View();
+    const uint64_t our_hwnd = reinterpret_cast<uint64_t>(GW::render::GetWindowHandle());
+    for (uint32_t i = 0; i < kMaxPlayers; ++i) {
+        if (view->AccountData[i].IsSlotActive) {
+            continue;
+        }
+        if (!TryReserveSlot(static_cast<int>(i), 0)) {
+            continue;  // another writer won the race
+        }
+        AccountStruct& slot = view->AccountData[i];
+        slot = AccountStruct{};
+        slot.SlotNumber = i;
+        slot.IsSlotActive = true;
+        WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+        slot.Key.HWND = our_hwnd;
+        slot.Key.EntityType = entity_type;
+        slot.Key.LocalIndex = local_id;
+        view->Keys[i] = slot.Key;
+        return static_cast<int>(i);
     }
-    AccountStruct& slot = View()->AccountData[index];
-    slot = AccountStruct{};
-    slot.SlotNumber = index;
-    slot.IsSlotActive = true;
-    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
-    slot.Key.HWND = reinterpret_cast<uint64_t>(GW::render::GetWindowHandle());
-    slot.Key.EntityType = entity_type;
-    slot.Key.LocalIndex = local_id;
-    View()->Keys[index] = slot.Key;
-    return index;
+    return -1;
 }
 
 void Manager::FillHeroPayload(AccountStruct& slot, const std::string& email, int slot_index,
@@ -697,7 +761,9 @@ void Manager::FillHeroPayload(AccountStruct& slot, const std::string& email, int
     slot.IsHero = true;
     slot.IsPet = false;
     slot.IsNPC = false;
-    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    if (!SlotEmailEquals(slot.AccountEmail, kMaxEmailLen, email)) {  // write-once, see FillAccountPayload
+        WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    }
     slot.Key.EntityType = 1;
     slot.Key.LocalIndex = hero.hero_id;
     View()->Keys[slot_index] = slot.Key;
@@ -746,7 +812,9 @@ void Manager::FillPetPayload(AccountStruct& slot, const std::string& email, int 
     slot.IsHero = false;
     slot.IsPet = true;
     slot.IsNPC = false;
-    WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    if (!SlotEmailEquals(slot.AccountEmail, kMaxEmailLen, email)) {  // write-once, see FillAccountPayload
+        WriteWideField(slot.AccountEmail, kMaxEmailLen, email);
+    }
     slot.Key.EntityType = 2;
     slot.Key.LocalIndex = 0;
     View()->Keys[slot_index] = slot.Key;

@@ -709,6 +709,7 @@ using UIMessageCallback = PY4GW::HookCallback<UIMessage, void*, void*>;
 using FrameUIMessageCallback = PY4GW::HookCallback<const Frame*, UIMessage, void*, void*>;
 using KeyCallback = PY4GW::HookCallback<uint32_t>;
 using CreateUIComponentCallback = std::function<void(CreateUIComponentPacket*)>;
+using UIMessageLogEntry = std::tuple<uint64_t, uint32_t, bool, bool, uint32_t, std::vector<uint8_t>, std::vector<uint8_t>>;
 
 bool Initialize();
 void Shutdown();
@@ -882,6 +883,9 @@ ArrayByte* GetSettings();
 bool GetIsUIDrawn();
 bool GetIsShiftScreenShot();
 bool GetIsWorldMapShowing();
+std::vector<UIMessageLogEntry> GetUIMessageLogs();
+void ClearUIMessageLogs();
+void RecordUIMessage(UIMessage message_id, void* wparam, void* lparam, bool incoming, bool is_frame_message, uint32_t frame_id);
 bool SetFrameVisible(Frame* frame, bool flag);
 bool SetFrameDisabled(Frame* frame, bool flag);
 bool SetFrameOpacity(Frame* frame, float opacity, float fade_time = 0.0f);

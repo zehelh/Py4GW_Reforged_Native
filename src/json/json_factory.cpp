@@ -301,8 +301,16 @@ void JsonFile::Bind(const std::filesystem::path& path) {
                                     "' - " + ec.message());
     }
 
+    std::error_code exists_ec;
+    const bool document_exists = std::filesystem::exists(path_, exists_ec);
+    if (exists_ec) {
+        Logger::Instance().LogError("Json: could not inspect existing document '" +
+                                    path_.string() + "' for '" + name_ +
+                                    "' - " + exists_ec.message());
+    }
+
     root_ = json::object();
-    if (!LoadLocked()) {
+    if (!LoadLocked() && scope_ == JsonScope::Global && !document_exists && !exists_ec) {
         SeedFromTemplateLocked();
     }
 
@@ -321,27 +329,58 @@ void JsonFile::Bind(const std::filesystem::path& path) {
 }
 
 void JsonFile::SeedFromTemplateLocked() {
+    if (scope_ != JsonScope::Global) {
+        return;
+    }
+
     const std::filesystem::path defaults =
         process_manager::GetModuleDirectory() / "json" / "Defaults";
 
-    std::filesystem::path specialized = defaults / name_;
-    specialized.replace_extension(".json");
-    const std::filesystem::path fallback = defaults / "default_template.json";
-
     std::error_code ec;
-    std::filesystem::path template_path;
-    if (std::filesystem::exists(specialized, ec)) {
-        template_path = specialized;
-    } else if (std::filesystem::exists(fallback, ec)) {
-        template_path = fallback;
-    } else {
+    std::filesystem::path template_path = defaults / name_;
+    template_path.replace_extension(".json");
+    if (!std::filesystem::exists(template_path, ec)) {
+        if (ec) {
+            Logger::Instance().LogError("Json: could not inspect default seed '" +
+                                        template_path.string() + "' for '" + name_ +
+                                        "' - " + ec.message());
+        }
         return;
     }
 
     json seeded;
-    if (ReadJsonFile(template_path, &seeded)) {
+    if (!ReadJsonFile(template_path, &seeded) || !seeded.is_object()) {
+        Logger::Instance().LogError("Json: default seed '" + template_path.string() +
+                                    "' for '" + name_ + "' is not an object; leaving document empty");
+        return;
+    }
+
+    // A seed is first-create data, not a normal pending mutation. Global saves
+    // replay only pending operations, so merely marking this document dirty
+    // would later write the current disk tree and discard the in-memory seed.
+    // Serialize creation with peers, then either adopt their valid first write
+    // or atomically materialize this exact named seed before normal writes run.
+    CrossProcessLock lock(path_);
+    std::error_code document_ec;
+    const bool document_exists = std::filesystem::exists(path_, document_ec);
+    if (document_ec) {
+        Logger::Instance().LogError("Json: could not inspect seeded document '" +
+                                    path_.string() + "' for '" + name_ +
+                                    "' - " + document_ec.message());
+        return;
+    }
+    if (document_exists) {
+        json existing;
+        if (ReadJsonFile(path_, &existing) && existing.is_object()) {
+            root_ = std::move(existing);
+        } else {
+            Logger::Instance().LogError("Json: existing seeded document '" + path_.string() +
+                                        "' for '" + name_ + "' is invalid; leaving document empty");
+        }
+        return;
+    }
+    if (WriteJsonFileAtomic(path_, seeded)) {
         root_ = std::move(seeded);
-        MarkDirtyLocked();
     }
 }
 
@@ -397,9 +436,23 @@ bool JsonFile::WriteMergedGlobalLocked() {
     // so a concurrent account's keys are preserved.
     CrossProcessLock lock(path_);
 
+    std::error_code exists_ec;
+    const bool document_exists = std::filesystem::exists(path_, exists_ec);
+    if (exists_ec) {
+        Logger::Instance().LogError("Json: could not inspect global document '" +
+                                    path_.string() + "' for merge - " +
+                                    exists_ec.message());
+        return false;
+    }
+
     json disk = json::object();
-    json loaded;
-    if (ReadJsonFile(path_, &loaded) && loaded.is_object()) {
+    if (document_exists) {
+        json loaded;
+        if (!ReadJsonFile(path_, &loaded) || !loaded.is_object()) {
+            Logger::Instance().LogError("Json: existing global document '" + path_.string() +
+                                        "' is invalid; refusing to overwrite it during merge");
+            return false;
+        }
         disk = std::move(loaded);
     }
 

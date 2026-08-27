@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <sstream>
 
 #include <windows.h>
@@ -66,6 +67,68 @@ bool IsSafeEmailSegment(const std::string& email) {
     return true;
 }
 
+// A named mutex serializes the read-modify-write cycle for one global INI.
+// The OS releases an abandoned mutex if a peer dies, so a crashed client cannot
+// leave settings persistence permanently blocked.
+class CrossProcessLock {
+public:
+    explicit CrossProcessLock(const std::filesystem::path& path) {
+        const size_t hash = std::hash<std::string>{}(path.lexically_normal().string());
+        std::ostringstream name;
+        name << "Local\\Py4GW_settings_" << std::hex << hash;
+        handle_ = ::CreateMutexA(nullptr, FALSE, name.str().c_str());
+        if (!handle_) {
+            Logger::Instance().LogError(
+                "Settings: could not create cross-process lock for '" + path.string() +
+                "' (err " + std::to_string(::GetLastError()) +
+                "); writing without cross-process serialization");
+            return;
+        }
+        const DWORD wait = ::WaitForSingleObject(handle_, INFINITE);
+        owned_ = (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED);
+    }
+
+    ~CrossProcessLock() {
+        if (handle_) {
+            if (owned_) {
+                ::ReleaseMutex(handle_);
+            }
+            ::CloseHandle(handle_);
+        }
+    }
+
+    CrossProcessLock(const CrossProcessLock&) = delete;
+    CrossProcessLock& operator=(const CrossProcessLock&) = delete;
+
+private:
+    HANDLE handle_ = nullptr;
+    bool owned_ = false;
+};
+
+bool WriteIniContentAtomic(const std::filesystem::path& path, const std::string& content) {
+    const std::filesystem::path temp_path = path.string() + ".tmp";
+    {
+        std::ofstream out(temp_path, std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!out.is_open()) {
+            Logger::Instance().LogError("Settings save failed (cannot open temp file): " + temp_path.string());
+            return false;
+        }
+        out << content;
+        if (!out.good()) {
+            Logger::Instance().LogError("Settings save failed (write error): " + temp_path.string());
+            return false;
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(temp_path, path, ec);
+    if (ec) {
+        Logger::Instance().LogError("Settings save failed (rename): " + path.string() + " - " + ec.message());
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 /* ---------------- IniFile internals ---------------- */
@@ -79,16 +142,11 @@ void IniFile::Bind(const std::filesystem::path& path) {
         return;
     }
 
-    // Collect writes staged before the anchor resolved; they are newer than
-    // whatever is on disk, so they win after the load.
-    std::vector<std::tuple<std::string, std::string, std::string>> staged;
-    for (const auto& section : sections_) {
-        for (const auto& line : section.lines) {
-            if (line.kind == IniLine::Kind::KeyValue) {
-                staged.emplace_back(section.name, line.key, line.value);
-            }
-        }
-    }
+    // Writes staged before the account anchor resolved are newer than disk, so
+    // replay their journal after the initial load rather than replacing every
+    // on-disk key with the staging document's sparse in-memory view.
+    std::vector<PendingOp> staged = std::move(pending_);
+    pending_.clear();
 
     path_ = path;
     bound_ = true;
@@ -101,17 +159,27 @@ void IniFile::Bind(const std::filesystem::path& path) {
                                     "' - " + ec.message());
     }
 
+    std::error_code exists_ec;
+    const bool file_exists = std::filesystem::exists(path_, exists_ec);
+    if (exists_ec) {
+        Logger::Instance().LogError("Settings: could not inspect existing document '" +
+                                    path_.string() + "' for '" + name_ + "' - " +
+                                    exists_ec.message());
+    }
+
     sections_.clear();
-    if (!LoadLocked()) {
-        // File did not exist on disk: seed a brand-new document from its
-        // template (settings/Defaults/<name>.cfg, then default_template.cfg).
+    if (!LoadLocked() && !file_exists && !exists_ec) {
+        // Only a missing file is a first-create event. An existing unreadable
+        // document must remain evidence for deliberate recovery, not become a
+        // template-backed replacement on the next autosave.
         SeedFromTemplateLocked();
     }
 
-    for (const auto& [section, key, value] : staged) {
-        SetValueLocked(section, key, value);
+    for (const auto& op : staged) {
+        ApplyOpLocked(op);
     }
     if (!staged.empty()) {
+        pending_ = std::move(staged);
         MarkDirtyLocked();
     }
 }
@@ -239,33 +307,48 @@ bool IniFile::SaveLocked() {
     if (!bound_) {
         return false;
     }
-
-    const std::string content = SerializeLocked();
-    const std::filesystem::path temp_path = path_.string() + ".tmp";
-
-    {
-        std::ofstream out(temp_path, std::ios::out | std::ios::trunc | std::ios::binary);
-        if (!out.is_open()) {
-            Logger::Instance().LogError("Settings save failed (cannot open temp file): " + temp_path.string());
-            return false;
-        }
-        out << content;
-        if (!out.good()) {
-            Logger::Instance().LogError("Settings save failed (write error): " + temp_path.string());
-            return false;
-        }
+    const bool saved = scope_ == SettingsScope::Global
+        ? WriteMergedGlobalLocked()
+        : WriteIniContentAtomic(path_, SerializeLocked());
+    if (saved) {
+        dirty_ = false;
+        first_dirty_tick_ = 0;
+        pending_.clear();
     }
+    return saved;
+}
 
-    // Atomic swap: disk always holds either the full old or full new file.
-    std::error_code ec;
-    std::filesystem::rename(temp_path, path_, ec);
-    if (ec) {
-        Logger::Instance().LogError("Settings save failed (rename): " + path_.string() + " - " + ec.message());
+bool IniFile::WriteMergedGlobalLocked() {
+    // Reload under the same mutex used by every peer, then apply only this
+    // process's mutations. This preserves a peer's unrelated keys and all
+    // comments/raw lines from the newest on-disk document.
+    CrossProcessLock lock(path_);
+    IniFile disk(name_, SettingsScope::Global);
+    disk.path_ = path_;
+    disk.bound_ = true;
+    std::error_code exists_ec;
+    const bool file_exists = std::filesystem::exists(path_, exists_ec);
+    if (exists_ec) {
+        Logger::Instance().LogError("Settings: could not inspect global document '" +
+                                    path_.string() + "' for merge - " +
+                                    exists_ec.message());
         return false;
     }
-
-    dirty_ = false;
-    first_dirty_tick_ = 0;
+    if (!disk.LoadLocked() && file_exists) {
+        Logger::Instance().LogError("Settings: existing global document '" + path_.string() +
+                                    "' is unreadable; refusing to overwrite it during merge");
+        return false;
+    }
+    if (!file_exists) {
+        disk.SeedFromTemplateLocked();
+    }
+    for (const auto& op : pending_) {
+        disk.ApplyOpLocked(op);
+    }
+    if (!WriteIniContentAtomic(path_, disk.SerializeLocked())) {
+        return false;
+    }
+    sections_ = std::move(disk.sections_);
     return true;
 }
 
@@ -324,6 +407,50 @@ void IniFile::SetValueLocked(const std::string& section, const std::string& key,
     line.key = key;
     line.value = value;
     target.lines.push_back(std::move(line));
+}
+
+bool IniFile::DeleteKeyLocked(const std::string& section, const std::string& key) {
+    for (auto& candidate : sections_) {
+        if (candidate.name != section) {
+            continue;
+        }
+        for (auto it = candidate.lines.begin(); it != candidate.lines.end(); ++it) {
+            if (it->kind == IniLine::Kind::KeyValue && it->key == key) {
+                candidate.lines.erase(it);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool IniFile::DeleteSectionLocked(const std::string& section) {
+    for (auto it = sections_.begin(); it != sections_.end(); ++it) {
+        if (!it->name.empty() && it->name == section) {
+            sections_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void IniFile::RecordOpLocked(PendingOp::Kind kind, const std::string& section,
+                             const std::string& key, const std::string& value) {
+    pending_.push_back(PendingOp{kind, section, key, value});
+}
+
+void IniFile::ApplyOpLocked(const PendingOp& op) {
+    switch (op.kind) {
+    case PendingOp::Kind::SetValue:
+        SetValueLocked(op.section, op.key, op.value);
+        break;
+    case PendingOp::Kind::DeleteKey:
+        DeleteKeyLocked(op.section, op.key);
+        break;
+    case PendingOp::Kind::DeleteSection:
+        DeleteSectionLocked(op.section);
+        break;
+    }
 }
 
 /* ---------------- SettingsManager ---------------- */

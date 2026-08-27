@@ -73,6 +73,7 @@ double IniFile::GetFloat(const std::string& section, const std::string& key, dou
 void IniFile::SetString(const std::string& section, const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(mutex_);
     SetValueLocked(section, key, value);
+    RecordOpLocked(PendingOp::Kind::SetValue, section, key, value);
     MarkDirtyLocked();
 }
 
@@ -119,29 +120,20 @@ std::vector<std::string> IniFile::GetKeys(const std::string& section) const {
 
 bool IniFile::DeleteKey(const std::string& section, const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& candidate : sections_) {
-        if (candidate.name != section) {
-            continue;
-        }
-        for (auto it = candidate.lines.begin(); it != candidate.lines.end(); ++it) {
-            if (it->kind == IniLine::Kind::KeyValue && it->key == key) {
-                candidate.lines.erase(it);
-                MarkDirtyLocked();
-                return true;
-            }
-        }
+    if (DeleteKeyLocked(section, key)) {
+        RecordOpLocked(PendingOp::Kind::DeleteKey, section, key);
+        MarkDirtyLocked();
+        return true;
     }
     return false;
 }
 
 bool IniFile::DeleteSection(const std::string& section) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = sections_.begin(); it != sections_.end(); ++it) {
-        if (!it->name.empty() && it->name == section) {
-            sections_.erase(it);
-            MarkDirtyLocked();
-            return true;
-        }
+    if (DeleteSectionLocked(section)) {
+        RecordOpLocked(PendingOp::Kind::DeleteSection, section);
+        MarkDirtyLocked();
+        return true;
     }
     return false;
 }

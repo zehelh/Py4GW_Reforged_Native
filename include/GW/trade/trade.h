@@ -18,7 +18,7 @@ bool AcceptTrade();
 bool CancelTrade();
 bool ChangeOffer();
 bool SubmitOffer(uint32_t gold);
-bool RemoveItem(uint32_t slot);
+bool RemoveItem(uint32_t item_id);
 TradeItem* IsItemOffered(uint32_t item_id);
 bool OfferItem(uint32_t item_id, uint32_t quantity = 0);
 
