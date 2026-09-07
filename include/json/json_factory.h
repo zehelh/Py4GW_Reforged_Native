@@ -135,7 +135,7 @@ private:
 
     // Locked helpers (caller already holds mutex_):
     bool LoadLocked();                 // read + parse the file into root_
-    void SeedFromTemplateLocked();     // seed a brand-new file from json/Defaults/*
+    void SeedFromTemplateLocked();     // seed one missing Global doc from json/Defaults/<name>.json
     bool SaveLocked();                 // serialize + write, clear dirty/journal
     bool WriteMergedGlobalLocked();    // locked read-merge-write for Global scope
     void RecordOpLocked(const std::string& path, bool remove, const nlohmann::json& value);

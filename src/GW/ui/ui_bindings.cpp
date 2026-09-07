@@ -660,6 +660,8 @@ PYBIND11_EMBEDDED_MODULE(PyUIManager, m) {
     py::class_<UIManagerShim>(m, "UIManager")
         // ---- Global state / language ----
         .def_static("get_text_language", []() { return static_cast<uint32_t>(GW::ui::GetTextLanguage()); })
+        .def_static("get_ui_message_logs", &GW::ui::GetUIMessageLogs)
+        .def_static("clear_ui_message_logs", &GW::ui::ClearUIMessageLogs)
         .def_static("is_world_map_showing", []() { return GW::ui::GetIsWorldMapShowing(); })
         .def_static("is_ui_drawn", []() { return GW::ui::GetIsUIDrawn(); })
         .def_static("is_shift_screenshot", []() { return GW::ui::GetIsShiftScreenShot(); })

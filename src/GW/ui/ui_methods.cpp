@@ -1334,6 +1334,8 @@ bool SendFrameUIMessage(Frame* frame, UIMessage message_id, void* wparam, void* 
         return false;
     }
 
+    RecordUIMessage(message_id, wparam, lparam, false, true, frame->frame_id);
+
     auto callbacks = CopyFrameCallbacks(message_id);
     if (callbacks.empty()) {
         PY4GW::HookBase::EnterHook();
@@ -1370,6 +1372,9 @@ bool SendFrameUIMessage(Frame* frame, UIMessage message_id, void* wparam, void* 
 }
 
 bool SendUIMessage(UIMessage message_id, void* wparam, void* lparam, bool skip_hooks) {
+    if (!skip_hooks) {
+        RecordUIMessage(message_id, wparam, lparam, false, false, 0);
+    }
     if (skip_hooks) {
         return RawSendUiMessage(message_id, wparam, lparam);
     }

@@ -126,6 +126,17 @@ private:
         std::vector<IniLine> lines;
     };
 
+    // One mutation made since the last successful disk synchronization. Global
+    // documents replay these onto the newest file while holding the shared
+    // cross-process lock, so a peer's unrelated INI keys/comments survive.
+    struct PendingOp {
+        enum class Kind { SetValue, DeleteKey, DeleteSection };
+        Kind kind = Kind::SetValue;
+        std::string section;
+        std::string key;
+        std::string value;
+    };
+
     // Constructed only by SettingsManager::Open(). Non-copyable: a document is a
     // unique, shared resource keyed by (name, scope).
     IniFile(std::string name, SettingsScope scope);
@@ -143,14 +154,20 @@ private:
     bool LoadLocked();                 // read + parse the file into sections_
     void SeedFromTemplateLocked();     // seed a brand-new file from settings/Defaults/*.cfg
     bool SaveLocked();                 // serialize + write, clear dirty
+    bool WriteMergedGlobalLocked();    // locked read-merge-write for Global scope
     std::string SerializeLocked() const;
     void ParseLocked(const std::string& content);
     void MarkDirtyLocked();            // set dirty + stamp the debounce ticks
+    void RecordOpLocked(PendingOp::Kind kind, const std::string& section,
+                        const std::string& key = "", const std::string& value = "");
+    void ApplyOpLocked(const PendingOp& op);
 
     const IniSection* FindSectionLocked(const std::string& section) const;
     IniSection& FindOrCreateSectionLocked(const std::string& section);
     const IniLine* FindKeyLocked(const std::string& section, const std::string& key) const;
     void SetValueLocked(const std::string& section, const std::string& key, const std::string& value);
+    bool DeleteKeyLocked(const std::string& section, const std::string& key);
+    bool DeleteSectionLocked(const std::string& section);
 
     mutable std::mutex mutex_;         // guards every field below (all public methods lock)
     std::string name_;
@@ -161,6 +178,7 @@ private:
     uint64_t first_dirty_tick_ = 0;    // when the current dirty streak started (max-dirty cap)
     uint64_t last_change_tick_ = 0;    // when the last write happened (write-quiet debounce)
     std::vector<IniSection> sections_;
+    std::vector<PendingOp> pending_;   // mutations since last disk sync (Global merge)
 };
 
 // Process-wide owner and registry of every IniFile. Also drives account binding,

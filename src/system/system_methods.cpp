@@ -19,6 +19,15 @@
 
 namespace PY4GW {
 
+namespace {
+
+// Temporary post-update fallback. It is reached only after the client enters
+// a map and both the live email and persisted account anchor have failed.
+constexpr bool kEnableDebugAccountAnchorFallback = true;
+constexpr const char* kDebugAccountAnchor = "debug@mail.com";
+
+}  // namespace
+
 /* ---------------- System console methods ---------------- */
 
 void System::AppendConsoleMessage(const std::string& module_name, MessageType message_type, const std::string& message) {
@@ -235,6 +244,21 @@ void System::UpdateAccountAnchor() {
                 WriteConsoleMessage("Py4GW", MessageType::Notice, "Account anchor ready (ini): " + anchor);
                 return;
             }
+        }
+
+        if (kEnableDebugAccountAnchorFallback) {
+            {
+                std::lock_guard<std::mutex> lock(account_mutex_);
+                account_email_ = kDebugAccountAnchor;
+            }
+            account_email_set_.store(true);
+
+            std::error_code ec;
+            std::filesystem::create_directories(GetSettingsDirectory(), ec);
+            WriteConsoleMessage(
+                "Py4GW", MessageType::Warning,
+                std::string("DEBUG account anchor fallback active: ") + kDebugAccountAnchor);
+            return;
         }
 
         PY4GW_PANIC("Account anchor resolution failed after two map-loaded email attempts; Py4GW.ini [settings] account_anchor is required.");

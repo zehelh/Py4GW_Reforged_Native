@@ -429,10 +429,13 @@ public:
 
 private:
     // Slot dispatch (keyed on the stable email anchor). Mirror of the Python
-    // AllAccounts find/claim methods, own-entity scope only.
+    // AllAccounts find/claim methods, own-entity scope only. Fresh claims are
+    // made atomic by reserving the slot's Key.HWND with an interlocked CAS, so
+    // simultaneous writers can no longer double-claim the same slot.
     int FindAccountSlot(const std::string& email) const;
-    int FindEmptyOrExpiredSlot(bool allow_expired_reclaim) const;
     bool IsSlotExpired(int index, uint64_t now) const;
+    bool TryReserveSlot(int index, uint64_t expected_hwnd);
+    void InitAccountSlot(AllAccounts* view, int index, const std::string& email, uint64_t hwnd);
 
     int FindOrClaimAccountSlot(const std::string& email);
 

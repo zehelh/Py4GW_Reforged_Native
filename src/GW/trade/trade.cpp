@@ -16,8 +16,8 @@ bool Initialize() {
     if (g_initialized) {
         return true;
     }
-    Logger::Instance().LogInfo("[trade] Trade module initialized.");
     g_initialized = true;
+    Logger::Instance().LogInfo("[trade] Trade module initialized.");
     return true;
 }
 
@@ -26,8 +26,8 @@ void Shutdown() {
     if (!g_initialized) {
         return;
     }
-    Logger::Instance().LogInfo("[trade] Trade module shutdown.");
     g_initialized = false;
+    Logger::Instance().LogInfo("[trade] Trade module shutdown.");
 }
 
 }  // namespace GW::trade
